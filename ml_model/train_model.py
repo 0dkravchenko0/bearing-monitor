@@ -8,6 +8,7 @@ import numpy as np
 from typing import Tuple
 import sys
 import os
+from pathlib import Path
 
 # Добавляем путь к модулям для корректного импорта
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -138,8 +139,11 @@ def main():
     print("Обучение модели классификации неисправностей подшипников")
     print("=" * 60)
     
+    # Количество образцов для каждого класса
+    n_samples_per_class = 500
+    
     # Генерируем синтетические данные
-    X, y = generate_synthetic_data(n_samples_per_class=500)
+    X, y = generate_synthetic_data(n_samples_per_class=n_samples_per_class)
     
     # Создаем и обучаем классификатор
     print("\nОбучение модели...")
@@ -173,8 +177,25 @@ def main():
     
     # Сохраняем модель
     print("\n" + "=" * 60)
-    model_path = "ml_model/bearing_classifier_model.joblib"
+    model_path = "bearing_classifier_model.joblib"
     classifier.save_model(model_path)
+    
+    # Сохраняем метаданные модели
+    import json
+    from datetime import datetime
+    metadata = {
+        "accuracy": float(metrics['accuracy']),
+        "training_date": datetime.now().isoformat(),
+        "n_train_samples": metrics['n_train_samples'],
+        "n_test_samples": metrics['n_test_samples'],
+        "n_estimators": 150,
+        "max_depth": 25,
+        "version": "1.0.0"
+    }
+    metadata_path = Path(model_path).parent / "model_metadata.json"
+    with open(metadata_path, 'w', encoding='utf-8') as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    print(f"Метаданные модели сохранены в {metadata_path}")
     print("=" * 60)
     
     # Тестируем модель на нескольких примерах

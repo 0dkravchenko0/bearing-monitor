@@ -224,8 +224,10 @@ class BearingClassifier:
         
         save_path = path or self.model_path
         
-        # Создаем директорию если её нет
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # Создаем директорию если её нет (только если путь содержит директорию)
+        dir_path = os.path.dirname(save_path)
+        if dir_path:  # Если есть директория в пути
+            os.makedirs(dir_path, exist_ok=True)
         
         # Сохраняем модель и нормализатор
         model_data = {

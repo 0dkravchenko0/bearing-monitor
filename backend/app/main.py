@@ -12,6 +12,9 @@ from contextlib import asynccontextmanager
 
 # Импортируем модуль интеграции ML модели
 from .ml_integration import load_model, get_predictor, health_check
+from .prediction_logger import get_logger
+import os
+from pathlib import Path
 
 # ==================== Инициализация ML модели при старте ====================
 
@@ -292,6 +295,25 @@ async def receive_vibration_data(data: VibrationDataRequest):
                     sampling_rate=data.sampling_rate
                 )
                 ml_prediction = PredictResponse(**prediction_result)
+                
+                # Логируем предсказание
+                try:
+                    logger = get_logger()
+                    logger.log_prediction(
+                        device_id=data.device_id,
+                        vibration_data={
+                            "vibration_x": data.vibration_x,
+                            "vibration_y": data.vibration_y,
+                            "vibration_z": data.vibration_z,
+                            "sampling_rate": data.sampling_rate,
+                            "temperature": data.temperature
+                        },
+                        prediction=prediction_result,
+                        timestamp=data.timestamp
+                    )
+                except Exception as log_error:
+                    # Не прерываем выполнение при ошибке логирования
+                    print(f"Ошибка при логировании предсказания: {str(log_error)}")
         except Exception as ml_error:
             # Логируем ошибку, но не прерываем сохранение данных
             print(f"Ошибка при вызове ML модели: {str(ml_error)}")
@@ -562,6 +584,75 @@ async def get_ml_status():
         Dict: Информация о статусе ML модели
     """
     return health_check()
+
+
+class ModelInfoResponse(BaseModel):
+    """Модель ответа для информации о ML модели."""
+    загружена: bool = Field(..., description="Загружена ли модель")
+    путь_к_модели: str = Field(..., description="Путь к файлу модели")
+    количество_классов: int = Field(..., description="Количество классов классификации")
+    классы: List[str] = Field(..., description="Список названий классов")
+    точность_обучения: Optional[float] = Field(None, description="Точность модели на тестовой выборке")
+    дата_обучения: Optional[str] = Field(None, description="Дата обучения модели")
+    версия_модели: str = Field(..., description="Версия модели")
+    размер_файла_мб: Optional[float] = Field(None, description="Размер файла модели в МБ")
+
+
+@app.get(
+    "/api/v1/model-info",
+    response_model=ModelInfoResponse,
+    summary="Информация о ML модели",
+    description="Возвращает детальную информацию о загруженной ML модели"
+)
+async def get_model_info():
+    """
+    Возвращает информацию о ML модели.
+    
+    Returns:
+        ModelInfoResponse: Информация о модели
+    """
+    health = health_check()
+    predictor = get_predictor()
+    
+    model_path = health.get("путь_к_модели", "")
+    is_loaded = health.get("загружена", False)
+    
+    # Получаем информацию о файле модели
+    file_size_mb = None
+    if os.path.exists(model_path):
+        file_size_mb = os.path.getsize(model_path) / (1024 * 1024)
+    
+    # Пытаемся получить метаданные из файла модели
+    training_accuracy = None
+    training_date = None
+    
+    # Проверяем наличие файла метаданных
+    metadata_path = Path(model_path).parent / "model_metadata.json"
+    if metadata_path.exists():
+        try:
+            import json
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                metadata = json.load(f)
+                training_accuracy = metadata.get("accuracy")
+                training_date = metadata.get("training_date")
+        except Exception:
+            pass
+    
+    # Если метаданных нет, пытаемся получить из времени модификации файла
+    if training_date is None and os.path.exists(model_path):
+        mtime = os.path.getmtime(model_path)
+        training_date = datetime.fromtimestamp(mtime).isoformat()
+    
+    return ModelInfoResponse(
+        загружена=is_loaded,
+        путь_к_модели=model_path,
+        количество_классов=4,
+        классы=["норма", "износ внутреннего кольца", "износ внешнего кольца", "неисправность шарика"],
+        точность_обучения=training_accuracy,
+        дата_обучения=training_date,
+        версия_модели="1.0.0",
+        размер_файла_мб=file_size_mb
+    )
 
 
 @app.get("/", summary="Корневой эндпоинт")
