@@ -11,7 +11,7 @@ import uuid
 from contextlib import asynccontextmanager
 
 # Импортируем модуль интеграции ML модели
-from .ml_integration import initialize_ml_model, get_ml_manager
+from .ml_integration import load_model, get_predictor, health_check
 
 # ==================== Инициализация ML модели при старте ====================
 
@@ -23,11 +23,14 @@ async def lifespan(app: FastAPI):
     """
     # Загрузка ML модели при старте
     print("Загрузка ML модели...")
-    ml_manager = initialize_ml_model()
-    if ml_manager.is_available():
-        print("✓ ML модель успешно загружена")
-    else:
-        print(f"⚠ ML модель не загружена: {ml_manager.error_message}")
+    try:
+        predictor = load_model()
+        if predictor.is_loaded:
+            print("✓ ML модель успешно загружена")
+        else:
+            print(f"⚠ ML модель не загружена: {predictor.error_message}")
+    except Exception as e:
+        print(f"⚠ Ошибка при загрузке ML модели: {e}")
     yield
     # Очистка при остановке (если нужна)
     print("Остановка приложения...")
@@ -275,14 +278,18 @@ async def receive_vibration_data(data: VibrationDataRequest):
         # Автоматически вызываем ML модель для предсказания
         ml_prediction = None
         try:
-            ml_manager = get_ml_manager()
-            if ml_manager.is_available():
-                prediction_result = ml_manager.predict(
-                    vibration_x=data.vibration_x,
-                    vibration_y=data.vibration_y,
-                    vibration_z=data.vibration_z,
-                    sampling_rate=data.sampling_rate,
-                    temperature=data.temperature
+            predictor = get_predictor()
+            if predictor and predictor.is_loaded:
+                # Преобразуем данные в формат 2D массива
+                vibration_data = [
+                    data.vibration_x,
+                    data.vibration_y,
+                    data.vibration_z
+                ]
+                prediction_result = predictor.predict(
+                    vibration_data=vibration_data,
+                    temperature=data.temperature,
+                    sampling_rate=data.sampling_rate
                 )
                 ml_prediction = PredictResponse(**prediction_result)
         except Exception as ml_error:
@@ -510,20 +517,21 @@ async def predict_bearing_status(request: PredictRequest):
         HTTPException: Если ML модель не доступна или произошла ошибка
     """
     try:
-        ml_manager = get_ml_manager()
+        predictor = get_predictor()
         
         # Проверяем доступность модели
-        if not ml_manager.is_available():
+        if not predictor or not predictor.is_loaded:
+            health = health_check()
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"ML модель не доступна: {ml_manager.error_message or 'Модель не загружена'}"
+                detail=f"ML модель не доступна: {health.get('ошибка', 'Модель не загружена')}"
             )
         
         # Выполняем предсказание
-        prediction_result = ml_manager.predict_from_2d_array(
+        prediction_result = predictor.predict(
             vibration_data=request.vibration_data,
-            sampling_rate=request.sampling_rate,
-            temperature=request.temperature
+            temperature=request.temperature,
+            sampling_rate=request.sampling_rate
         )
         
         return PredictResponse(**prediction_result)
@@ -553,15 +561,14 @@ async def get_ml_status():
     Returns:
         Dict: Информация о статусе ML модели
     """
-    ml_manager = get_ml_manager()
-    return ml_manager.get_status()
+    return health_check()
 
 
 @app.get("/", summary="Корневой эндпоинт")
 async def root():
     """Корневой эндпоинт с информацией о API."""
-    ml_manager = get_ml_manager()
-    ml_status = "доступна" if ml_manager.is_available() else "недоступна"
+    health = health_check()
+    ml_status = "доступна" if health.get("доступна", False) else "недоступна"
     
     return {
         "message": "Система мониторинга вибрации подшипников",
