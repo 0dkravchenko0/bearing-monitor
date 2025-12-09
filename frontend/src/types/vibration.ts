@@ -32,6 +32,20 @@ export interface MLDiagnosis {
   recommendations?: string[];
 }
 
+export interface MLPrediction {
+  состояние: string;
+  вероятность: number; // 0-1
+  рекомендация: string;
+  рекомендации: string[];
+  метрики: {
+    уверенность_процентах: number;
+    вероятности_классов: {
+      [key: string]: number; // "норма": 95.5, "износ внутреннего кольца": 2.1, и т.д.
+    };
+    код_состояния: number;
+  };
+}
+
 export type MonitoringStatus = 'stopped' | 'running' | 'calibrating';
 
 

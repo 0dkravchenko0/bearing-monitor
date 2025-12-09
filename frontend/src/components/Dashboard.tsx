@@ -11,12 +11,23 @@ import {
   Paper,
   Alert,
   CircularProgress,
-  Stack
+  Stack,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  List,
+  ListItem,
+  ListItemText,
+  Divider,
+  LinearProgress
 } from '@mui/material';
 import {
   PlayArrow,
   Stop,
-  Settings
+  Settings,
+  Refresh,
+  Info
 } from '@mui/icons-material';
 import {
   Chart as ChartJS,
@@ -24,14 +35,15 @@ import {
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
   Filler
 } from 'chart.js';
-import { Line } from 'react-chartjs-2';
-// import axios from 'axios'; // Будет использоваться при подключении к реальному API
-import { VibrationData, MLDiagnosis, MonitoringStatus } from '../types/vibration';
+import { Line, Bar } from 'react-chartjs-2';
+import axios from 'axios';
+import { VibrationData, MLDiagnosis, MonitoringStatus, MLPrediction } from '../types/vibration';
 import { formatNumber, formatDateTime, getStatusColor } from '../utils/formatters';
 
 // Регистрация компонентов Chart.js
@@ -40,13 +52,14 @@ ChartJS.register(
   LinearScale,
   PointElement,
   LineElement,
+  BarElement,
   Title,
   Tooltip,
   Legend,
   Filler
 );
 
-// const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000'; // Будет использоваться при подключении к реальному API
+const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 /**
  * Компонент Dashboard для мониторинга вибрации подшипников
@@ -55,8 +68,12 @@ const Dashboard: React.FC = () => {
   const [monitoringStatus, setMonitoringStatus] = useState<MonitoringStatus>('stopped');
   const [vibrationData, setVibrationData] = useState<VibrationData | null>(null);
   const [mlDiagnosis, setMlDiagnosis] = useState<MLDiagnosis | null>(null);
+  const [mlPrediction, setMlPrediction] = useState<MLPrediction | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingML, setIsLoadingML] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [mlError, setMlError] = useState<string | null>(null);
+  const [mlDetailsOpen, setMlDetailsOpen] = useState(false);
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Симуляция данных вибрации (в реальном приложении данные приходят с бэкенда)
@@ -117,28 +134,89 @@ const Dashboard: React.FC = () => {
     }
   };
 
+  // Загрузка ML предсказания
+  const fetchMLPrediction = async (data: VibrationData) => {
+    try {
+      setIsLoadingML(true);
+      setMlError(null);
+
+      // Формируем данные для запроса
+      const vibrationDataArray = [
+        data.vibration_x,
+        data.vibration_y,
+        data.vibration_z
+      ];
+
+      const response = await axios.post<MLPrediction>(
+        `${API_BASE_URL}/api/v1/predict`,
+        {
+          vibration_data: vibrationDataArray,
+          temperature: data.temperature,
+          sampling_rate: data.sampling_rate
+        }
+      );
+
+      setMlPrediction(response.data);
+    } catch (err: any) {
+      const errorMessage = err.response?.data?.detail || 'Ошибка при получении предсказания ML модели';
+      setMlError(errorMessage);
+      console.error('Ошибка ML предсказания:', err);
+      // Не сбрасываем mlPrediction, оставляем предыдущее значение
+    } finally {
+      setIsLoadingML(false);
+    }
+  };
+
   // Загрузка данных вибрации
   const fetchVibrationData = async () => {
     try {
       setIsLoading(true);
       setError(null);
 
-      // В реальном приложении здесь будет запрос к API
-      // const response = await axios.get(`${API_BASE_URL}/api/v1/vibration-data/latest`);
-      // setVibrationData(response.data);
-
-      // Симуляция для демонстрации
+      // Симуляция для демонстрации (можно заменить на реальный API)
       const mockData = generateMockData();
       setVibrationData(mockData);
       setMlDiagnosis(generateMLDiagnosis(mockData));
 
-      // Отправка данных на сервер (если нужно)
-      // await axios.post(`${API_BASE_URL}/api/v1/vibration-data`, mockData);
+      // Отправка данных на сервер и получение ML предсказания
+      try {
+        const response = await axios.post(
+          `${API_BASE_URL}/api/v1/vibration-data`,
+          {
+            device_id: mockData.device_id,
+            timestamp: mockData.timestamp,
+            vibration_x: mockData.vibration_x,
+            vibration_y: mockData.vibration_y,
+            vibration_z: mockData.vibration_z,
+            sampling_rate: mockData.sampling_rate,
+            temperature: mockData.temperature
+          }
+        );
+
+        // Если в ответе есть ml_prediction, используем его
+        if (response.data.ml_prediction) {
+          setMlPrediction(response.data.ml_prediction);
+        } else {
+          // Иначе запрашиваем отдельно
+          await fetchMLPrediction(mockData);
+        }
+      } catch (apiErr) {
+        // Если API недоступен, используем симуляцию
+        console.warn('API недоступен, используется симуляция:', apiErr);
+        // Можно также вызвать fetchMLPrediction для отдельного запроса
+      }
     } catch (err) {
       setError('Ошибка при загрузке данных вибрации');
       console.error(err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Ручное обновление ML диагностики
+  const handleRefreshMLDiagnosis = async () => {
+    if (vibrationData) {
+      await fetchMLPrediction(vibrationData);
     }
   };
 
@@ -193,6 +271,14 @@ const Dashboard: React.FC = () => {
       setIsLoading(false);
     }
   };
+
+  // Автоматическое получение ML предсказания при изменении данных вибрации
+  useEffect(() => {
+    if (vibrationData && monitoringStatus === 'running' && !isLoadingML) {
+      fetchMLPrediction(vibrationData);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [vibrationData?.timestamp, monitoringStatus]);
 
   // Очистка интервала при размонтировании
   useEffect(() => {
@@ -296,6 +382,96 @@ const Dashboard: React.FC = () => {
   };
 
   const chartData = getChartData();
+
+  // Получение цвета для состояния на основе вероятности
+  const getStatusColorFromProbability = (probability: number): 'success' | 'warning' | 'error' => {
+    if (probability > 0.9) return 'success';
+    if (probability >= 0.7) return 'warning';
+    return 'error';
+  };
+
+  // Получение цвета для индикатора
+  const getStatusIndicatorColor = (probability: number): string => {
+    if (probability > 0.9) return '#4caf50'; // Зеленый
+    if (probability >= 0.7) return '#ff9800'; // Желтый/Оранжевый
+    return '#f44336'; // Красный
+  };
+
+  // Подготовка данных для гистограммы вероятностей
+  const getProbabilityChartData = () => {
+    if (!mlPrediction) return null;
+
+    const probabilities = mlPrediction.метрики.вероятности_классов;
+    const labels = Object.keys(probabilities);
+    const values = Object.values(probabilities);
+
+    // Цвета для каждого класса
+    const colors = labels.map(label => {
+      if (label === 'норма') return 'rgba(76, 175, 80, 0.8)';
+      if (label.includes('внутреннего')) return 'rgba(255, 152, 0, 0.8)';
+      if (label.includes('внешнего')) return 'rgba(255, 193, 7, 0.8)';
+      return 'rgba(244, 67, 54, 0.8)'; // Неисправность шарика
+    });
+
+    return {
+      labels,
+      datasets: [
+        {
+          label: 'Вероятность (%)',
+          data: values,
+          backgroundColor: colors,
+          borderColor: colors.map(c => c.replace('0.8', '1')),
+          borderWidth: 2
+        }
+      ]
+    };
+  };
+
+  const probabilityChartData = getProbabilityChartData();
+
+  const probabilityChartOptions = {
+    responsive: true,
+    maintainAspectRatio: false,
+    plugins: {
+      legend: {
+        display: false
+      },
+      title: {
+        display: true,
+        text: 'Вероятности классов',
+        font: {
+          size: 14,
+          weight: 'bold' as const
+        }
+      },
+      tooltip: {
+        callbacks: {
+          label: (context: any) => {
+            return `${context.label}: ${formatNumber(context.parsed.y)}%`;
+          }
+        }
+      }
+    },
+    scales: {
+      y: {
+        beginAtZero: true,
+        max: 100,
+        title: {
+          display: true,
+          text: 'Вероятность (%)'
+        },
+        ticks: {
+          callback: (value: any) => `${value}%`
+        }
+      },
+      x: {
+        title: {
+          display: true,
+          text: 'Состояние'
+        }
+      }
+    }
+  };
 
   return (
     <Container maxWidth="xl" sx={{ py: 4 }}>
@@ -527,7 +703,265 @@ const Dashboard: React.FC = () => {
             </Card>
           </Grid>
         )}
+
+        {/* Диагностика ML модели */}
+        <Grid item xs={12}>
+          <Card>
+            <CardContent>
+              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                <Typography variant="h6">
+                  Диагностика ML модели
+                </Typography>
+                <Stack direction="row" spacing={2}>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    startIcon={<Refresh />}
+                    onClick={handleRefreshMLDiagnosis}
+                    disabled={!vibrationData || isLoadingML}
+                  >
+                    Обновить диагностику
+                  </Button>
+                  {mlPrediction && (
+                    <Button
+                      variant="outlined"
+                      size="small"
+                      startIcon={<Info />}
+                      onClick={() => setMlDetailsOpen(true)}
+                    >
+                      Подробнее
+                    </Button>
+                  )}
+                </Stack>
+              </Box>
+
+              {mlError && (
+                <Alert severity="warning" sx={{ mb: 2 }} onClose={() => setMlError(null)}>
+                  {mlError}
+                </Alert>
+              )}
+
+              {isLoadingML && (
+                <Box sx={{ mb: 2 }}>
+                  <LinearProgress />
+                  <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+                    Выполняется анализ ML модели...
+                  </Typography>
+                </Box>
+              )}
+
+              {mlPrediction ? (
+                <Grid container spacing={3}>
+                  {/* Текущее состояние и вероятность */}
+                  <Grid item xs={12} md={4}>
+                    <Paper 
+                      sx={{ 
+                        p: 3, 
+                        textAlign: 'center',
+                        border: `3px solid ${getStatusIndicatorColor(mlPrediction.вероятность)}`,
+                        borderRadius: 2
+                      }}
+                    >
+                      <Typography variant="body2" color="text.secondary" gutterBottom>
+                        Предсказанное состояние
+                      </Typography>
+                      <Chip
+                        label={mlPrediction.состояние}
+                        color={getStatusColorFromProbability(mlPrediction.вероятность)}
+                        sx={{ 
+                          fontSize: '1.1rem',
+                          fontWeight: 'bold',
+                          mb: 2,
+                          height: 36
+                        }}
+                      />
+                      <Box sx={{ mt: 2 }}>
+                        <Typography variant="h4" fontWeight="bold" color={getStatusIndicatorColor(mlPrediction.вероятность)}>
+                          {formatNumber(mlPrediction.вероятность * 100)}%
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary">
+                          Уверенность предсказания
+                        </Typography>
+                      </Box>
+                    </Paper>
+                  </Grid>
+
+                  {/* Рекомендации */}
+                  <Grid item xs={12} md={4}>
+                    <Paper sx={{ p: 3, height: '100%' }}>
+                      <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                        Рекомендации
+                      </Typography>
+                      <List dense>
+                        {mlPrediction.рекомендации.slice(0, 3).map((rec, idx) => (
+                          <ListItem key={idx} sx={{ px: 0 }}>
+                            <ListItemText
+                              primary={rec}
+                              primaryTypographyProps={{ variant: 'body2' }}
+                            />
+                          </ListItem>
+                        ))}
+                        {mlPrediction.рекомендации.length > 3 && (
+                          <Typography variant="caption" color="text.secondary">
+                            и еще {mlPrediction.рекомендации.length - 3}...
+                          </Typography>
+                        )}
+                      </List>
+                    </Paper>
+                  </Grid>
+
+                  {/* Гистограмма вероятностей */}
+                  <Grid item xs={12} md={4}>
+                    <Paper sx={{ p: 2, height: '100%' }}>
+                      <Box sx={{ height: 200 }}>
+                        {probabilityChartData ? (
+                          <Bar data={probabilityChartData} options={probabilityChartOptions} />
+                        ) : (
+                          <Box
+                            sx={{
+                              height: '100%',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center'
+                            }}
+                          >
+                            <Typography variant="body2" color="text.secondary">
+                              Нет данных для графика
+                            </Typography>
+                          </Box>
+                        )}
+                      </Box>
+                    </Paper>
+                  </Grid>
+                </Grid>
+              ) : (
+                <Alert severity="info">
+                  Запустите мониторинг для получения диагностики ML модели
+                </Alert>
+              )}
+            </CardContent>
+          </Card>
+        </Grid>
       </Grid>
+
+      {/* Модальное окно с подробной информацией о предсказании */}
+      <Dialog
+        open={mlDetailsOpen}
+        onClose={() => setMlDetailsOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>
+          Подробная информация о предсказании ML модели
+        </DialogTitle>
+        <DialogContent>
+          {mlPrediction && (
+            <Box>
+              <Stack spacing={3}>
+                {/* Основная информация */}
+                <Box>
+                  <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                    Основная информация
+                  </Typography>
+                  <Divider sx={{ mb: 2 }} />
+                  <Grid container spacing={2}>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        Состояние
+                      </Typography>
+                      <Chip
+                        label={mlPrediction.состояние}
+                        color={getStatusColorFromProbability(mlPrediction.вероятность)}
+                        sx={{ mt: 1 }}
+                      />
+                    </Grid>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        Вероятность
+                      </Typography>
+                      <Typography variant="h6" color={getStatusIndicatorColor(mlPrediction.вероятность)} sx={{ mt: 1 }}>
+                        {formatNumber(mlPrediction.вероятность * 100)}%
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        Код состояния
+                      </Typography>
+                      <Typography variant="body1" sx={{ mt: 1 }}>
+                        {mlPrediction.метрики.код_состояния}
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={6}>
+                      <Typography variant="body2" color="text.secondary">
+                        Уверенность (в процентах)
+                      </Typography>
+                      <Typography variant="body1" sx={{ mt: 1 }}>
+                        {formatNumber(mlPrediction.метрики.уверенность_процентах)}%
+                      </Typography>
+                    </Grid>
+                  </Grid>
+                </Box>
+
+                {/* Вероятности всех классов */}
+                <Box>
+                  <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                    Вероятности всех классов
+                  </Typography>
+                  <Divider sx={{ mb: 2 }} />
+                  <List>
+                    {Object.entries(mlPrediction.метрики.вероятности_классов).map(([className, probability]) => (
+                      <ListItem key={className}>
+                        <ListItemText
+                          primary={className}
+                          secondary={`${formatNumber(probability)}%`}
+                        />
+                        <Box sx={{ width: 200, mr: 2 }}>
+                          <LinearProgress
+                            variant="determinate"
+                            value={probability}
+                            sx={{
+                              height: 8,
+                              borderRadius: 4,
+                              backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                              '& .MuiLinearProgress-bar': {
+                                backgroundColor: className === 'норма' 
+                                  ? '#4caf50' 
+                                  : className.includes('износ')
+                                  ? '#ff9800'
+                                  : '#f44336'
+                              }
+                            }}
+                          />
+                        </Box>
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+
+                {/* Все рекомендации */}
+                <Box>
+                  <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                    Все рекомендации
+                  </Typography>
+                  <Divider sx={{ mb: 2 }} />
+                  <List>
+                    {mlPrediction.рекомендации.map((rec, idx) => (
+                      <ListItem key={idx}>
+                        <ListItemText
+                          primary={`${idx + 1}. ${rec}`}
+                        />
+                      </ListItem>
+                    ))}
+                  </List>
+                </Box>
+              </Stack>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setMlDetailsOpen(false)}>Закрыть</Button>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 };
