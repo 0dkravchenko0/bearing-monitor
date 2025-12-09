@@ -30,7 +30,7 @@ import {
   Filler
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
-import axios from 'axios';
+// import axios from 'axios'; // Будет использоваться при подключении к реальному API
 import { VibrationData, MLDiagnosis, MonitoringStatus } from '../types/vibration';
 import { formatNumber, formatDateTime, getStatusColor } from '../utils/formatters';
 
@@ -46,7 +46,7 @@ ChartJS.register(
   Filler
 );
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+// const API_BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000'; // Будет использоваться при подключении к реальному API
 
 /**
  * Компонент Dashboard для мониторинга вибрации подшипников

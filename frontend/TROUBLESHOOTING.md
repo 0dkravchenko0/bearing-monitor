@@ -69,3 +69,4 @@ npm install --legacy-peer-deps
 3. Попробуйте очистить кэш браузера (Ctrl+Shift+Delete)
 
 
+

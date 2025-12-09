@@ -8,12 +8,37 @@ from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, validator
 import uuid
+from contextlib import asynccontextmanager
+
+# Импортируем модуль интеграции ML модели
+from .ml_integration import initialize_ml_model, get_ml_manager
+
+# ==================== Инициализация ML модели при старте ====================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Контекстный менеджер для управления жизненным циклом приложения.
+    Загружает ML модель при старте и выгружает при остановке.
+    """
+    # Загрузка ML модели при старте
+    print("Загрузка ML модели...")
+    ml_manager = initialize_ml_model()
+    if ml_manager.is_available():
+        print("✓ ML модель успешно загружена")
+    else:
+        print(f"⚠ ML модель не загружена: {ml_manager.error_message}")
+    yield
+    # Очистка при остановке (если нужна)
+    print("Остановка приложения...")
+
 
 # Инициализация FastAPI приложения
 app = FastAPI(
     title="Система мониторинга вибрации подшипников",
     description="Веб-система для предиктивного анализа вибрации подшипников электродвигателей",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Настройка CORS для фронтенда
@@ -131,6 +156,63 @@ class ControlResponse(BaseModel):
     message: str = Field(..., description="Сообщение о результате")
 
 
+class PredictRequest(BaseModel):
+    """Модель запроса для предсказания состояния подшипника."""
+    vibration_data: List[List[float]] = Field(
+        ..., 
+        description="2D массив вибрационных данных [ось][значения]. Ожидается минимум 2 оси (X, Y), опционально Z"
+    )
+    temperature: float = Field(..., description="Температура (°C)")
+    sampling_rate: float = Field(..., gt=0, description="Частота дискретизации (Гц)")
+    
+    @validator('vibration_data')
+    def validate_vibration_data(cls, v):
+        """Проверка формата вибрационных данных."""
+        if not v or len(v) == 0:
+            raise ValueError('Массив вибрационных данных не может быть пустым')
+        if len(v) < 2:
+            raise ValueError('Требуется минимум 2 оси вибрации (X и Y)')
+        # Проверяем, что все оси не пустые
+        for i, axis in enumerate(v):
+            if not axis or len(axis) == 0:
+                raise ValueError(f'Ось {i} не может быть пустой')
+        return v
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "vibration_data": [
+                    [0.1, 0.12, 0.11, 0.13, 0.09],  # Ось X
+                    [0.08, 0.10, 0.09, 0.11, 0.07],  # Ось Y
+                    [0.05, 0.06, 0.05, 0.07, 0.04]   # Ось Z (опционально)
+                ],
+                "temperature": 45.5,
+                "sampling_rate": 1000.0
+            }
+        }
+
+
+class PredictResponse(BaseModel):
+    """Модель ответа для предсказания состояния подшипника."""
+    состояние: str = Field(..., description="Название состояния на русском языке")
+    вероятность: float = Field(..., ge=0.0, le=1.0, description="Вероятность предсказания (0-1)")
+    рекомендация: str = Field(..., description="Первая рекомендация")
+    рекомендации: List[str] = Field(..., description="Список всех рекомендаций")
+    метрики: Dict[str, Any] = Field(..., description="Детальные метрики предсказания")
+
+
+class VibrationDataResponseWithPrediction(BaseModel):
+    """Модель ответа при сохранении данных вибрации с предсказанием ML."""
+    id: str = Field(..., description="Уникальный идентификатор записи")
+    device_id: str = Field(..., description="Идентификатор устройства")
+    timestamp: datetime = Field(..., description="Время замера")
+    message: str = Field(..., description="Сообщение о результате операции")
+    ml_prediction: Optional[PredictResponse] = Field(
+        None, 
+        description="Предсказание ML модели (если модель доступна)"
+    )
+
+
 # ==================== Хранилище данных в памяти ====================
 
 # Хранилище для данных вибрации
@@ -144,20 +226,21 @@ device_statuses: Dict[str, Dict[str, Any]] = {}
 
 @app.post(
     "/api/v1/vibration-data",
-    response_model=VibrationDataResponse,
+    response_model=VibrationDataResponseWithPrediction,
     status_code=status.HTTP_201_CREATED,
     summary="Прием данных вибрации",
-    description="Эндпоинт для приема и сохранения данных вибрации подшипников"
+    description="Эндпоинт для приема и сохранения данных вибрации подшипников. Автоматически вызывает ML модель для предсказания состояния."
 )
 async def receive_vibration_data(data: VibrationDataRequest):
     """
-    Принимает данные вибрации от устройства и сохраняет их в памяти.
+    Принимает данные вибрации от устройства, сохраняет их в памяти и автоматически
+    вызывает ML модель для предсказания состояния подшипника.
     
     Args:
         data: Данные вибрации с валидацией через Pydantic
         
     Returns:
-        VibrationDataResponse: Подтверждение сохранения с ID записи
+        VibrationDataResponseWithPrediction: Подтверждение сохранения с ID записи и предсказанием ML
     """
     try:
         # Генерируем уникальный ID для записи
@@ -189,11 +272,30 @@ async def receive_vibration_data(data: VibrationDataRequest):
             device_statuses[data.device_id]["total_measurements"] += 1
             device_statuses[data.device_id]["status"] = "активно"
         
-        return VibrationDataResponse(
+        # Автоматически вызываем ML модель для предсказания
+        ml_prediction = None
+        try:
+            ml_manager = get_ml_manager()
+            if ml_manager.is_available():
+                prediction_result = ml_manager.predict(
+                    vibration_x=data.vibration_x,
+                    vibration_y=data.vibration_y,
+                    vibration_z=data.vibration_z,
+                    sampling_rate=data.sampling_rate,
+                    temperature=data.temperature
+                )
+                ml_prediction = PredictResponse(**prediction_result)
+        except Exception as ml_error:
+            # Логируем ошибку, но не прерываем сохранение данных
+            print(f"Ошибка при вызове ML модели: {str(ml_error)}")
+            # Продолжаем выполнение без предсказания
+        
+        return VibrationDataResponseWithPrediction(
             id=record_id,
             device_id=data.device_id,
             timestamp=data.timestamp,
-            message=f"Данные вибрации успешно сохранены для устройства {data.device_id}"
+            message=f"Данные вибрации успешно сохранены для устройства {data.device_id}",
+            ml_prediction=ml_prediction
         )
     except Exception as e:
         raise HTTPException(
@@ -387,15 +489,89 @@ async def control_device(control: ControlRequest):
         )
 
 
+@app.post(
+    "/api/v1/predict",
+    response_model=PredictResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Предсказание состояния подшипника",
+    description="Эндпоинт для получения предсказания состояния подшипника от ML модели по вибрационным данным"
+)
+async def predict_bearing_status(request: PredictRequest):
+    """
+    Предсказывает состояние подшипника по вибрационным данным используя ML модель.
+    
+    Args:
+        request: Запрос с вибрационными данными в формате 2D массива
+        
+    Returns:
+        PredictResponse: Результат предсказания на русском языке с вероятностями и рекомендациями
+        
+    Raises:
+        HTTPException: Если ML модель не доступна или произошла ошибка
+    """
+    try:
+        ml_manager = get_ml_manager()
+        
+        # Проверяем доступность модели
+        if not ml_manager.is_available():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"ML модель не доступна: {ml_manager.error_message or 'Модель не загружена'}"
+            )
+        
+        # Выполняем предсказание
+        prediction_result = ml_manager.predict_from_2d_array(
+            vibration_data=request.vibration_data,
+            sampling_rate=request.sampling_rate,
+            temperature=request.temperature
+        )
+        
+        return PredictResponse(**prediction_result)
+        
+    except ValueError as e:
+        # Ошибки валидации данных
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Ошибка валидации данных: {str(e)}"
+        )
+    except HTTPException:
+        # Пробрасываем HTTP исключения как есть
+        raise
+    except Exception as e:
+        # Прочие ошибки
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при выполнении предсказания: {str(e)}"
+        )
+
+
+@app.get("/api/v1/ml-status", summary="Статус ML модели")
+async def get_ml_status():
+    """
+    Возвращает статус ML модели.
+    
+    Returns:
+        Dict: Информация о статусе ML модели
+    """
+    ml_manager = get_ml_manager()
+    return ml_manager.get_status()
+
+
 @app.get("/", summary="Корневой эндпоинт")
 async def root():
     """Корневой эндпоинт с информацией о API."""
+    ml_manager = get_ml_manager()
+    ml_status = "доступна" if ml_manager.is_available() else "недоступна"
+    
     return {
         "message": "Система мониторинга вибрации подшипников",
         "version": "1.0.0",
+        "ml_model": ml_status,
         "endpoints": {
             "vibration_data": "/api/v1/vibration-data",
+            "predict": "/api/v1/predict",
             "status": "/api/v1/status",
+            "ml_status": "/api/v1/ml-status",
             "history": "/api/v1/history",
             "control": "/api/v1/control",
             "docs": "/docs"
